@@ -32,7 +32,8 @@ class DCBConfig:
     loading: float = 2e-2
     lcmv_align_max: float = 0.92
     # Blend after NMF fusion: mag = α·fused + (1-α)·(mask·|Y_mvdr|)
-    alpha: float = 0.5
+    # α=0.4 selected on the HN spatial-speech tune set.
+    alpha: float = 0.4
     seed: int = 0
 
 

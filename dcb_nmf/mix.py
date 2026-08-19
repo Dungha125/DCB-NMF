@@ -13,6 +13,22 @@ def make_linear_array(n_mics: int = 4, spacing: float = 0.05) -> np.ndarray:
     return pos.astype(np.float64)
 
 
+def mic_x_from_xyz(xyz) -> np.ndarray:
+    """Centered x-coordinates of a linear array given XYZ positions."""
+    pos = np.asarray(xyz, dtype=np.float64)
+    x = pos[:, 0]
+    return x - x.mean()
+
+
+def azimuth_to_broadside_doa(az_deg: float) -> float:
+    """Map dataset azimuth (0° = +x endfire, 90° = +y broadside) to ULA DOA.
+
+    ``steering_vectors`` uses τ = p sin(θ)/c with θ = 0 at broadside.
+    Dataset angles are measured from the array axis, so θ = 90° − az.
+    """
+    return 90.0 - float(az_deg)
+
+
 def phase_align(steering: np.ndarray) -> np.ndarray:
     """Make microphone 0 real and nonnegative at each frequency."""
     ref = steering[:, :1]

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import argparse
 import sys
+from math import gcd
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.io import wavfile
+from scipy.signal import resample_poly
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -30,7 +33,29 @@ SR = 16000
 DURATION = 3.5
 N_FFT = 1024
 HOP = 256
-DOAS = [-40.0, 45.0]
+# User azimuth: 0°/180° = endfire, 90° = broadside (s1=15°, s2=165°).
+# Internal ULA uses 0° = broadside, delay ∝ sin(θ) → θ = 90° − az.
+DOAS_AZ = [15.0, 165.0]
+DOAS = [90.0 - a for a in DOAS_AZ]
+
+
+def _load_wav_mono(path: Path, target_sr: int) -> np.ndarray:
+    sr, raw = wavfile.read(path)
+    y = np.asarray(raw, dtype=np.float64)
+    if y.ndim == 2:
+        y = y.mean(axis=1)
+    if np.issubdtype(raw.dtype, np.integer):
+        y = y / max(np.iinfo(raw.dtype).max, 1)
+    if sr != target_sr:
+        g = gcd(target_sr, sr)
+        y = resample_poly(y, target_sr // g, sr // g)
+    peak = np.max(np.abs(y)) + 1e-12
+    return 0.9 * y / peak
+
+
+def _match_length(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    n = min(a.shape[0], b.shape[0])
+    return a[:n], b[:n]
 
 
 def _write_wav(path: Path, y: np.ndarray) -> None:
@@ -91,29 +116,58 @@ def _spec(ax, y: np.ndarray, title: str) -> None:
     ax.set_xlabel("s")
 
 
-def main() -> None:
+def main(s1_path: Path | None = None, s2_path: Path | None = None) -> None:
     out_dir = ROOT / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(0)
 
-    talkers = [
-        cocktail_talker(
-            DURATION,
-            SR,
-            f0=110.0,
-            formants=[(500, 80, 1.0), (1100, 100, 0.7), (2400, 150, 0.45)],
-            rng=rng,
-            n_bursts=4,
-        ),
-        cocktail_talker(
-            DURATION,
-            SR,
-            f0=200.0,
-            formants=[(350, 70, 1.0), (1900, 120, 0.85), (2800, 160, 0.35)],
-            rng=rng,
-            n_bursts=4,
-        ),
-    ]
+    if s1_path is not None and s2_path is not None:
+        t1 = _load_wav_mono(s1_path, SR)
+        t2 = _load_wav_mono(s2_path, SR)
+        t1, t2 = _match_length(t1, t2)
+        talkers = [t1, t2]
+        src_labels = (
+            f"Nguồn 1 ban đầu  ({s1_path.name}, DOA={DOAS_AZ[0]:.0f}°)",
+            f"Nguồn 2 ban đầu  ({s2_path.name}, DOA={DOAS_AZ[1]:.0f}°)",
+        )
+        scene_note = (
+            f"Cocktail party  (WAV sources {s1_path.name} + {s2_path.name} "
+            f"+ diffuse noise, SNR=10 dB, {t1.shape[0] / SR:.2f}s)"
+        )
+        src_desc = (
+            f"  Source 1: {s1_path.name}, DOA={DOAS_AZ[0]:.0f} deg\n"
+            f"  Source 2: {s2_path.name}, DOA={DOAS_AZ[1]:.0f} deg\n"
+            "  Mixture:  both sources at once + isotropic noise on 4-mic array"
+        )
+    else:
+        talkers = [
+            cocktail_talker(
+                DURATION,
+                SR,
+                f0=110.0,
+                formants=[(500, 80, 1.0), (1100, 100, 0.7), (2400, 150, 0.45)],
+                rng=rng,
+                n_bursts=4,
+            ),
+            cocktail_talker(
+                DURATION,
+                SR,
+                f0=200.0,
+                formants=[(350, 70, 1.0), (1900, 120, 0.85), (2800, 160, 0.35)],
+                rng=rng,
+                n_bursts=4,
+            ),
+        ]
+        src_labels = (
+            f"Nguồn 1 ban đầu  (f0≈110 Hz, DOA={DOAS_AZ[0]:.0f}°)",
+            f"Nguồn 2 ban đầu  (f0≈200 Hz, DOA={DOAS_AZ[1]:.0f}°)",
+        )
+        scene_note = "Cocktail party  (2 talkers + diffuse noise, SNR=10 dB)"
+        src_desc = (
+            f"  Source 1: low pitch f0~110 Hz, DOA={DOAS_AZ[0]:.0f} deg, overlapping bursts\n"
+            f"  Source 2: high pitch f0~200 Hz, DOA={DOAS_AZ[1]:.0f} deg, interleaved/overlapping\n"
+            "  Mixture:  both talkers at once + isotropic noise on 4-mic array"
+        )
     mic_pos = make_linear_array(n_mics=4, spacing=0.05)
     mix, images, _noise = simulate_cocktail(
         talkers, DOAS, sr=SR, mic_pos=mic_pos, snr_db=10.0, rng=rng
@@ -144,10 +198,8 @@ def main() -> None:
     print(f"  DCB-NMF selected alpha={best_alpha:.1f}  (max SI-SDRi on this scene)")
 
     mix_ref = mix[:, 0]
-    print("Cocktail party  (2 talkers + diffuse noise, SNR=10 dB)")
-    print("  Source 1: low pitch f0~110 Hz, DOA=-40 deg, overlapping bursts")
-    print("  Source 2: high pitch f0~200 Hz, DOA=+45 deg, interleaved/overlapping")
-    print("  Mixture:  both talkers at once + isotropic noise on 4-mic array")
+    print(scene_note)
+    print(src_desc)
     print("Mean SI-SDRi over talkers  (SI-SDR(est) - SI-SDR(mix), permutation-invariant)")
     print("-" * 56)
     print(f"  {'mix_ref':<12}  {0.0:7.2f} dB   [0. 0.]")
@@ -201,14 +253,14 @@ def main() -> None:
     _wave(
         fig.add_subplot(gs[0, 0]),
         refs[0],
-        "Nguồn 1 ban đầu  (f0≈110 Hz, DOA=−40°)",
+        src_labels[0],
         ylim,
         "#1f77b4",
     )
     _wave(
         fig.add_subplot(gs[0, 1]),
         refs[1],
-        "Nguồn 2 ban đầu  (f0≈200 Hz, DOA=+45°)",
+        src_labels[1],
         ylim,
         "#d62728",
     )
@@ -281,4 +333,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="DCB-NMF cocktail-party demo")
+    parser.add_argument("--s1", type=Path, default=None, help="WAV for source 1")
+    parser.add_argument("--s2", type=Path, default=None, help="WAV for source 2")
+    args = parser.parse_args()
+    if (args.s1 is None) ^ (args.s2 is None):
+        parser.error("provide both --s1 and --s2, or neither")
+    main(args.s1, args.s2)
